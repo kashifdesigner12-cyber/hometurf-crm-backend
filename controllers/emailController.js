@@ -7,16 +7,18 @@ const GmailConnection = require('../models/GmailConnection');
 
 const {
   sendInitialAutoReply,
-  sendEmail,
 } = require('../services/emailService');
 
 const {
-  deleteGmailThread,
+  sendGmailEmail,
 } = require('../services/gmailService');
 
 /*
 |--------------------------------------------------------------------------
 | Resend Client
+|--------------------------------------------------------------------------
+| Kept for the existing Resend webhook compatibility.
+| Manual Gmail replies no longer use Resend.
 |--------------------------------------------------------------------------
 */
 
@@ -130,11 +132,14 @@ const handleResendWebhook = async (req, res) => {
         headers: {
           'svix-id':
             req.headers['svix-id'],
+
           'svix-timestamp':
             req.headers['svix-timestamp'],
+
           'svix-signature':
             req.headers['svix-signature'],
         },
+
         secret:
           process.env.RESEND_WEBHOOK_SECRET,
       });
@@ -142,7 +147,8 @@ const handleResendWebhook = async (req, res) => {
     if (event?.type !== 'email.received') {
       return res.status(200).json({
         success: true,
-        message: 'Webhook event ignored.',
+        message:
+          'Webhook event ignored.',
         eventType:
           event?.type || null,
       });
@@ -280,6 +286,7 @@ const handleResendWebhook = async (req, res) => {
       success: false,
       message:
         'Invalid or failed Resend webhook.',
+
       error:
         process.env.NODE_ENV ===
         'development'
@@ -385,9 +392,12 @@ const handleIncomingEmail = async (req, res) => {
           data: {
             conversationId:
               existingMessage.conversation,
+
             messageId:
               existingMessage._id,
+
             duplicate: true,
+
             autoReplySent: false,
           },
         });
@@ -415,7 +425,8 @@ const handleIncomingEmail = async (req, res) => {
           subject:
             emailSubject,
 
-          status: 'NEW',
+          status:
+            'NEW',
 
           lastMessage:
             emailText ||
@@ -522,6 +533,15 @@ const handleIncomingEmail = async (req, res) => {
 
     let autoReply = null;
 
+    /*
+    |--------------------------------------------------------------------------
+    | Initial Auto Reply
+    |--------------------------------------------------------------------------
+    | Gmail sync has its own Gmail API auto-reply flow.
+    | This remains for the existing /incoming Resend flow.
+    |--------------------------------------------------------------------------
+    */
+
     if (isNewConversation) {
       try {
         const existingInitialReply =
@@ -609,6 +629,7 @@ const handleIncomingEmail = async (req, res) => {
       success: true,
       message:
         'Incoming email processed successfully.',
+
       data: {
         conversationId:
           conversation._id,
@@ -647,8 +668,10 @@ const handleIncomingEmail = async (req, res) => {
 
     return res.status(500).json({
       success: false,
+
       message:
         'Unable to process incoming email.',
+
       error:
         process.env.NODE_ENV ===
         'development'
@@ -680,8 +703,10 @@ const getEmailConversations = async (
 
     return res.status(200).json({
       success: true,
+
       count:
         conversations.length,
+
       data:
         conversations,
     });
@@ -693,8 +718,10 @@ const getEmailConversations = async (
 
     return res.status(500).json({
       success: false,
+
       message:
         'Unable to fetch email conversations.',
+
       error:
         process.env.NODE_ENV ===
         'development'
@@ -723,6 +750,7 @@ const getEmailConversationById =
       ) {
         return res.status(400).json({
           success: false,
+
           message:
             'Invalid email conversation ID.',
         });
@@ -736,6 +764,7 @@ const getEmailConversationById =
       if (!conversation) {
         return res.status(404).json({
           success: false,
+
           message:
             'Email conversation not found.',
         });
@@ -752,6 +781,7 @@ const getEmailConversationById =
 
       return res.status(200).json({
         success: true,
+
         data: {
           conversation,
           messages,
@@ -765,8 +795,10 @@ const getEmailConversationById =
 
       return res.status(500).json({
         success: false,
+
         message:
           'Unable to fetch email conversation.',
+
         error:
           process.env.NODE_ENV ===
           'development'
@@ -783,14 +815,15 @@ const getEmailConversationById =
 | DELETE /api/emails/conversations/:id
 |--------------------------------------------------------------------------
 |
-| CRM Delete flow:
+| IMPORTANT:
+| CRM deletion does NOT touch Gmail.
 |
-| 1. Find CRM conversation.
-| 2. Get Gmail thread ID.
-| 3. Move Gmail thread to Trash.
-| 4. Delete CRM messages.
-| 5. Delete CRM conversation.
+| It only:
+| 1. Deletes CRM EmailMessage records.
+| 2. Deletes CRM EmailConversation record.
 |
+| Gmail emails remain untouched.
+|--------------------------------------------------------------------------
 */
 
 const deleteEmailConversation =
@@ -804,6 +837,7 @@ const deleteEmailConversation =
       ) {
         return res.status(400).json({
           success: false,
+
           message:
             'Invalid email conversation ID.',
         });
@@ -817,52 +851,15 @@ const deleteEmailConversation =
       if (!conversation) {
         return res.status(404).json({
           success: false,
+
           message:
             'Email conversation not found.',
         });
       }
 
-      const gmailThreadId =
-        conversation.gmailThreadId ||
-        '';
-
       /*
       |--------------------------------------------------------------------------
-      | Move Gmail Thread To Trash
-      |--------------------------------------------------------------------------
-      */
-
-      if (gmailThreadId) {
-        try {
-          await deleteGmailThread(
-            gmailThreadId
-          );
-
-          console.log(
-            `Gmail thread moved to Trash: ${gmailThreadId}`
-          );
-        } catch (gmailError) {
-          console.error(
-            'Gmail thread trash failed:',
-            gmailError
-          );
-
-          return res.status(500).json({
-            success: false,
-            message:
-              'Email could not be moved to Gmail Trash. CRM conversation was not deleted.',
-            error:
-              process.env.NODE_ENV ===
-              'development'
-                ? gmailError.message
-                : undefined,
-          });
-        }
-      }
-
-      /*
-      |--------------------------------------------------------------------------
-      | Delete CRM Messages
+      | Delete CRM Messages Only
       |--------------------------------------------------------------------------
       */
 
@@ -874,7 +871,7 @@ const deleteEmailConversation =
 
       /*
       |--------------------------------------------------------------------------
-      | Delete CRM Conversation
+      | Delete CRM Conversation Only
       |--------------------------------------------------------------------------
       */
 
@@ -886,9 +883,7 @@ const deleteEmailConversation =
         success: true,
 
         message:
-          gmailThreadId
-            ? 'Email conversation deleted and Gmail thread moved to Trash successfully.'
-            : 'Email conversation deleted successfully.',
+          'Email conversation deleted from CRM successfully. Gmail email was not changed.',
 
         data: {
           conversationId:
@@ -898,10 +893,11 @@ const deleteEmailConversation =
             conversation.customerEmail,
 
           gmailThreadId:
-            gmailThreadId || null,
+            conversation.gmailThreadId ||
+            null,
 
           gmailTrashed:
-            Boolean(gmailThreadId),
+            false,
 
           deletedMessages:
             deletedMessages.deletedCount ||
@@ -916,8 +912,10 @@ const deleteEmailConversation =
 
       return res.status(500).json({
         success: false,
+
         message:
           'Unable to delete email conversation.',
+
         error:
           process.env.NODE_ENV ===
           'development'
@@ -932,6 +930,11 @@ const deleteEmailConversation =
 | Send Manual Email Reply
 |--------------------------------------------------------------------------
 | POST /api/emails/conversations/:id/reply
+|--------------------------------------------------------------------------
+|
+| CRM -> Gmail API -> Customer
+|
+| Resend is NOT used here.
 |--------------------------------------------------------------------------
 */
 
@@ -950,6 +953,7 @@ const sendManualEmailReply =
       if (!text && !html) {
         return res.status(400).json({
           success: false,
+
           message:
             'Email message is required.',
         });
@@ -960,6 +964,7 @@ const sendManualEmailReply =
       ) {
         return res.status(400).json({
           success: false,
+
           message:
             'Invalid email conversation ID.',
         });
@@ -973,6 +978,7 @@ const sendManualEmailReply =
       if (!conversation) {
         return res.status(404).json({
           success: false,
+
           message:
             'Email conversation not found.',
         });
@@ -981,10 +987,17 @@ const sendManualEmailReply =
       if (!conversation.customerEmail) {
         return res.status(400).json({
           success: false,
+
           message:
             'Customer email address not found.',
         });
       }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Get Last Incoming Email
+      |--------------------------------------------------------------------------
+      */
 
       const lastIncomingMessage =
         await EmailMessage.findOne({
@@ -1008,6 +1021,12 @@ const sendManualEmailReply =
         lastIncomingMessage?.messageId ||
         '';
 
+      /*
+      |--------------------------------------------------------------------------
+      | Prepare Subject
+      |--------------------------------------------------------------------------
+      */
+
       const emailSubject =
         subject?.trim() ||
         (
@@ -1020,8 +1039,14 @@ const sendManualEmailReply =
             : 'Re: HomeTurf'
         );
 
+      /*
+      |--------------------------------------------------------------------------
+      | Send Through Gmail API
+      |--------------------------------------------------------------------------
+      */
+
       const result =
-        await sendEmail({
+        await sendGmailEmail({
           to:
             conversation.customerEmail,
 
@@ -1037,16 +1062,26 @@ const sendManualEmailReply =
           conversationId:
             conversation._id,
 
-          autoReplyType:
-            'GENERAL_REPLY',
-
-          isAutoReply:
-            false,
+          threadId:
+            conversation.gmailThreadId ||
+            '',
 
           inReplyTo,
 
           references,
+
+          isAutoReply:
+            false,
+
+          autoReplyType:
+            'GENERAL_REPLY',
         });
+
+      /*
+      |--------------------------------------------------------------------------
+      | Update Conversation
+      |--------------------------------------------------------------------------
+      */
 
       conversation.lastMessage =
         text ||
@@ -1058,13 +1093,20 @@ const sendManualEmailReply =
       conversation.status =
         'IN_PROGRESS';
 
+      if (
+        result?.messageId
+      ) {
+        conversation.latestMessageId =
+          result.messageId;
+      }
+
       await conversation.save();
 
       return res.status(200).json({
         success: true,
 
         message:
-          'Email reply sent successfully.',
+          'Email reply sent successfully through Gmail.',
 
         data: {
           conversationId:
@@ -1077,15 +1119,22 @@ const sendManualEmailReply =
             emailSubject,
 
           providerMessageId:
-            result.messageId || '',
+            result?.messageId || '',
+
+          gmailMessageId:
+            result?.messageId || '',
+
+          gmailThreadId:
+            conversation.gmailThreadId ||
+            null,
 
           message:
-            result.data || null,
+            result || null,
         },
       });
     } catch (error) {
       console.error(
-        'Send manual email reply error:',
+        'Send manual Gmail reply error:',
         error
       );
 

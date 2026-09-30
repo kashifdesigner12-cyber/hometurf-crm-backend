@@ -1,12 +1,7 @@
 const { google } = require('googleapis');
-
 const GmailConnection = require('../models/GmailConnection');
 const EmailConversation = require('../models/EmailConversation');
 const EmailMessage = require('../models/EmailMessage');
-
-const {
-  sendInitialAutoReply,
-} = require('./emailService');
 
 /*
 |--------------------------------------------------------------------------
@@ -43,10 +38,21 @@ const decodeBase64Url = (data = '') => {
   }
 
   try {
+    const normalized = data
+      .replace(/-/g, '+')
+      .replace(/_/g, '/');
+
+    const padding =
+      normalized.length % 4;
+
+    const padded =
+      padding
+        ? normalized +
+          '='.repeat(4 - padding)
+        : normalized;
+
     return Buffer.from(
-      data
-        .replace(/-/g, '+')
-        .replace(/_/g, '/'),
+      padded,
       'base64'
     ).toString('utf8');
   } catch (error) {
@@ -61,6 +67,23 @@ const decodeBase64Url = (data = '') => {
 
 /*
 |--------------------------------------------------------------------------
+| Encode Gmail Base64 URL Data
+|--------------------------------------------------------------------------
+*/
+
+const encodeBase64Url = (data = '') => {
+  return Buffer.from(
+    data,
+    'utf8'
+  )
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+};
+
+/*
+|--------------------------------------------------------------------------
 | Get Header Value
 |--------------------------------------------------------------------------
 */
@@ -69,11 +92,14 @@ const getHeader = (
   headers = [],
   name
 ) => {
+  const normalizedName =
+    String(name || '').toLowerCase();
+
   const header =
     headers.find(
       (item) =>
-        item.name?.toLowerCase() ===
-        name.toLowerCase()
+        item?.name?.toLowerCase() ===
+        normalizedName
     );
 
   return header?.value || '';
@@ -92,8 +118,11 @@ const extractEmailAddress = (
     return '';
   }
 
+  const stringValue =
+    String(value).trim();
+
   const match =
-    value.match(
+    stringValue.match(
       /<([^>]+)>/
     );
 
@@ -103,7 +132,9 @@ const extractEmailAddress = (
       .toLowerCase();
   }
 
-  return value
+  return stringValue
+    .replace(/^.*\s/, '')
+    .replace(/[<>]/g, '')
     .trim()
     .toLowerCase();
 };
@@ -122,7 +153,7 @@ const extractSenderName = (
   }
 
   const match =
-    value.match(
+    String(value).match(
       /^"?([^"<]+?)"?\s*<[^>]+>$/
     );
 
@@ -131,6 +162,52 @@ const extractSenderName = (
   }
 
   return '';
+};
+
+/*
+|--------------------------------------------------------------------------
+| Escape HTML
+|--------------------------------------------------------------------------
+*/
+
+const escapeHtml = (
+  value = ''
+) => {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+};
+
+/*
+|--------------------------------------------------------------------------
+| Encode Header Value
+|--------------------------------------------------------------------------
+|
+| Used for UTF-8 subject/name values.
+|--------------------------------------------------------------------------
+*/
+
+const encodeHeaderValue = (
+  value = ''
+) => {
+  const stringValue =
+    String(value);
+
+  if (
+    /^[\x00-\x7F]*$/.test(
+      stringValue
+    )
+  ) {
+    return stringValue;
+  }
+
+  return `=?UTF-8?B?${Buffer.from(
+    stringValue,
+    'utf8'
+  ).toString('base64')}?=`;
 };
 
 /*
@@ -199,9 +276,7 @@ const extractMessageBody = (
 
   for (const part of parts) {
     const result =
-      extractMessageBody(
-        part
-      );
+      extractMessageBody(part);
 
     if (
       result.text &&
@@ -266,9 +341,7 @@ const getGmailConnection =
       );
     }
 
-    if (
-      !connection.refreshToken
-    ) {
+    if (!connection.refreshToken) {
       throw new Error(
         'Gmail refresh token is missing. Please reconnect Gmail.'
       );
@@ -317,8 +390,7 @@ const getGmailClient =
       'tokens',
       async (tokens) => {
         try {
-          let changed =
-            false;
+          let changed = false;
 
           if (
             tokens.access_token
@@ -399,12 +471,10 @@ const getGmailMessage =
 | Move Gmail Thread To Trash
 |--------------------------------------------------------------------------
 |
-| Moves the complete Gmail thread to Gmail Trash.
+| Kept only for compatibility.
 |
-| This is intentionally NOT using threads.delete().
-| The CRM delete action should remove the email from
-| the Inbox while keeping it recoverable in Gmail Trash.
-|
+| CRM deletion currently does NOT call this function.
+|--------------------------------------------------------------------------
 */
 
 const deleteGmailThread =
@@ -433,11 +503,8 @@ const deleteGmailThread =
 
       return {
         success: true,
-
         threadId,
-
         trashed: true,
-
         message:
           'Gmail thread moved to Trash successfully.',
       };
@@ -456,160 +523,746 @@ const deleteGmailThread =
 
 /*
 |--------------------------------------------------------------------------
-| Send Initial Auto Reply
+| Build Initial Auto Reply
 |--------------------------------------------------------------------------
 */
 
-const sendGmailAutoReply = async ({
-  conversation,
-  senderEmail,
-  senderName,
-  messageId,
-  references,
+const buildInitialAutoReply = ({
+  senderName = '',
 }) => {
-  try {
-    if (!conversation?._id) {
+  const firstName =
+    senderName
+      ?.trim()
+      ?.split(/\s+/)[0] ||
+    'there';
+
+  const subject =
+    'Thanks for contacting HomeTurf';
+
+  const text = `Hi ${firstName},
+
+Thank you for contacting HomeTurf!
+
+We'd be happy to help you with your request.
+
+To help our team understand your requirements, please reply with the following information:
+
+Full Name:
+
+Phone Number:
+
+Property Address:
+
+Service Required:
+
+Approximate Lawn Size:
+
+Preferred Service Date:
+
+Your email address is already recorded from this email, so you do not need to provide it again.
+
+Once we receive this information, our team will review your request and get back to you.
+
+Thank you for choosing HomeTurf.
+
+Best regards,
+
+HomeTurf Team`;
+
+  const safeFirstName =
+    escapeHtml(firstName);
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+      <p>Hi ${safeFirstName},</p>
+
+      <p>
+        Thank you for contacting HomeTurf!
+      </p>
+
+      <p>
+        We'd be happy to help you with your request.
+      </p>
+
+      <p>
+        To help our team understand your requirements,
+        please reply with the following information:
+      </p>
+
+      <p>
+        <strong>Full Name:</strong><br>
+        <strong>Phone Number:</strong><br>
+        <strong>Property Address:</strong><br>
+        <strong>Service Required:</strong><br>
+        <strong>Approximate Lawn Size:</strong><br>
+        <strong>Preferred Service Date:</strong>
+      </p>
+
+      <p>
+        Your email address is already recorded from this email,
+        so you do not need to provide it again.
+      </p>
+
+      <p>
+        Once we receive this information, our team will review
+        your request and get back to you.
+      </p>
+
+      <p>
+        Thank you for choosing HomeTurf.
+      </p>
+
+      <p>
+        Best regards,<br>
+        <strong>HomeTurf Team</strong>
+      </p>
+    </div>
+  `;
+
+  return {
+    subject,
+    text,
+    html,
+  };
+};
+
+/*
+|--------------------------------------------------------------------------
+| Create RFC Message ID
+|--------------------------------------------------------------------------
+*/
+
+const createRfcMessageId = (
+  from
+) => {
+  const domain =
+    from?.split('@')[1] ||
+    'gmail.com';
+
+  return `<${Date.now()}.${process.hrtime.bigint().toString()}@${domain}>`;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Normalize References
+|--------------------------------------------------------------------------
+*/
+
+const normalizeReferences = (
+  references = '',
+  inReplyTo = ''
+) => {
+  const values = [];
+
+  const addReferences = (
+    value
+  ) => {
+    if (!value) {
+      return;
+    }
+
+    const matches =
+      String(value).match(
+        /<[^>]+>/g
+      );
+
+    if (matches) {
+      matches.forEach(
+        (item) => {
+          if (
+            !values.includes(item)
+          ) {
+            values.push(item);
+          }
+        }
+      );
+    }
+  };
+
+  addReferences(
+    references
+  );
+
+  addReferences(
+    inReplyTo
+  );
+
+  return values.join(' ');
+};
+
+/*
+|--------------------------------------------------------------------------
+| Send Email Directly Through Gmail API
+|--------------------------------------------------------------------------
+|
+| This function is used by:
+| - Manual CRM replies
+| - Gmail automatic replies
+|--------------------------------------------------------------------------
+*/
+
+const sendGmailEmail =
+  async ({
+    to,
+    subject,
+    text,
+    html,
+    threadId = '',
+    inReplyTo = '',
+    references = '',
+    conversationId = null,
+    isAutoReply = false,
+    autoReplyType = 'GENERAL_REPLY',
+  }) => {
+    if (!to) {
       throw new Error(
-        'Conversation ID is required for auto reply.'
+        'Recipient email is required.'
       );
     }
 
-    if (!senderEmail) {
+    const {
+      gmail,
+    } = await getGmailClient();
+
+    const from =
+      process.env.EMAIL_INBOX
+        ?.trim()
+        .toLowerCase();
+
+    if (!from) {
       throw new Error(
-        'Customer email is required for auto reply.'
+        'EMAIL_INBOX is not configured.'
+      );
+    }
+
+    const normalizedTo =
+      extractEmailAddress(to);
+
+    if (!normalizedTo) {
+      throw new Error(
+        'Recipient email address is invalid.'
       );
     }
 
     /*
     |--------------------------------------------------------------------------
-    | Prevent Duplicate Initial Auto Replies
+    | RFC Message ID
     |--------------------------------------------------------------------------
     */
 
-    const existingAutoReply =
-      await EmailMessage.findOne({
-        conversation:
-          conversation._id,
+    const generatedMessageId =
+      createRfcMessageId(
+        from
+      );
 
-        direction:
-          'OUTGOING',
+    /*
+    |--------------------------------------------------------------------------
+    | References
+    |--------------------------------------------------------------------------
+    */
 
-        isAutoReply:
-          true,
+    const normalizedReferences =
+      normalizeReferences(
+        references,
+        inReplyTo
+      );
 
-        autoReplyType:
-          'INITIAL_REQUEST',
+    /*
+    |--------------------------------------------------------------------------
+    | Headers
+    |--------------------------------------------------------------------------
+    */
+
+    const emailHeaders = [
+      `From: HomeTurf <${from}>`,
+      `To: ${normalizedTo}`,
+      `Subject: ${encodeHeaderValue(
+        subject || 'HomeTurf'
+      )}`,
+      `Date: ${new Date().toUTCString()}`,
+      `Message-ID: ${generatedMessageId}`,
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/alternative; boundary="HomeTurfBoundary"',
+    ];
+
+    /*
+    |--------------------------------------------------------------------------
+    | Reply Headers
+    |--------------------------------------------------------------------------
+    */
+
+    if (inReplyTo) {
+      emailHeaders.push(
+        `In-Reply-To: ${inReplyTo}`
+      );
+    }
+
+    if (normalizedReferences) {
+      emailHeaders.push(
+        `References: ${normalizedReferences}`
+      );
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Build MIME Message
+    |--------------------------------------------------------------------------
+    */
+
+    const plainText =
+      text ||
+      '';
+
+    const htmlText =
+      html ||
+      `<div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        ${escapeHtml(
+          plainText
+        ).replace(
+          /\n/g,
+          '<br>'
+        )}
+      </div>`;
+
+    const rawMessage = [
+      ...emailHeaders,
+
+      '',
+
+      '--HomeTurfBoundary',
+
+      'Content-Type: text/plain; charset="UTF-8"',
+
+      'Content-Transfer-Encoding: 8bit',
+
+      '',
+
+      plainText,
+
+      '',
+
+      '--HomeTurfBoundary',
+
+      'Content-Type: text/html; charset="UTF-8"',
+
+      'Content-Transfer-Encoding: 8bit',
+
+      '',
+
+      htmlText,
+
+      '',
+
+      '--HomeTurfBoundary--',
+    ].join('\r\n');
+
+    const encodedMessage =
+      encodeBase64Url(
+        rawMessage
+      );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Gmail API Send
+    |--------------------------------------------------------------------------
+    */
+
+    const requestBody = {
+      raw:
+        encodedMessage,
+    };
+
+    /*
+    |--------------------------------------------------------------------------
+    | Gmail Thread
+    |--------------------------------------------------------------------------
+    |
+    | Only attach threadId when a real Gmail thread ID exists.
+    |--------------------------------------------------------------------------
+    */
+
+    if (threadId) {
+      requestBody.threadId =
+        threadId;
+    }
+
+    const response =
+      await gmail.users.messages.send({
+        userId: 'me',
+        requestBody,
       });
 
-    if (existingAutoReply) {
+    const sentMessage =
+      response?.data || {};
+
+    if (!sentMessage.id) {
+      throw new Error(
+        'Gmail API did not return a sent message ID.'
+      );
+    }
+
+    console.log(
+      `Gmail email accepted successfully by Gmail API for ${normalizedTo}: ${sentMessage.id}`
+    );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Save Outgoing Message In MongoDB
+    |--------------------------------------------------------------------------
+    |
+    | Important:
+    | Gmail API success means Gmail accepted the message.
+    | It does not guarantee final recipient delivery.
+    |--------------------------------------------------------------------------
+    */
+
+    let outgoingMessage = null;
+
+    if (conversationId) {
+      outgoingMessage =
+        await EmailMessage.create({
+          conversation:
+            conversationId,
+
+          direction:
+            'OUTGOING',
+
+          senderEmail:
+            from,
+
+          recipientEmail:
+            normalizedTo,
+
+          senderName:
+            'HomeTurf Team',
+
+          subject:
+            subject ||
+            'HomeTurf',
+
+          text:
+            plainText,
+
+          html:
+            htmlText,
+
+          /*
+          |--------------------------------------------------------------------
+          | Actual RFC Message ID
+          |--------------------------------------------------------------------
+          */
+
+          messageId:
+            generatedMessageId,
+
+          /*
+          |--------------------------------------------------------------------
+          | Gmail API Message ID
+          |--------------------------------------------------------------------
+          */
+
+          gmailMessageId:
+            sentMessage.id,
+
+          /*
+          |--------------------------------------------------------------------
+          | Gmail Thread ID
+          |--------------------------------------------------------------------
+          */
+
+          gmailThreadId:
+            sentMessage.threadId ||
+            threadId ||
+            '',
+
+          providerMessageId:
+            sentMessage.id,
+
+          inReplyTo:
+            inReplyTo ||
+            '',
+
+          references:
+            normalizedReferences,
+
+          isAutoReply:
+            Boolean(isAutoReply),
+
+          autoReplyType:
+            autoReplyType ||
+            'GENERAL_REPLY',
+
+          deliveryStatus:
+            'SENT',
+        });
+
+      /*
+      |--------------------------------------------------------------------------
+      | Update Conversation
+      |--------------------------------------------------------------------------
+      */
+
+      try {
+        await EmailConversation.findByIdAndUpdate(
+          conversationId,
+          {
+            $set: {
+              latestMessageId:
+                generatedMessageId,
+
+              lastMessage:
+                plainText ||
+                'Email sent to customer.',
+
+              lastMessageAt:
+                new Date(),
+
+              status:
+                isAutoReply
+                  ? 'WAITING'
+                  : 'IN_PROGRESS',
+
+              ...(sentMessage.threadId
+                ? {
+                    gmailThreadId:
+                      sentMessage.threadId,
+                  }
+                : {}),
+            },
+          }
+        );
+      } catch (conversationUpdateError) {
+        console.error(
+          'Outgoing email conversation update error:',
+          conversationUpdateError
+        );
+      }
+    }
+
+    return {
+      success: true,
+
+      messageId:
+        sentMessage.id,
+
+      gmailMessageId:
+        sentMessage.id,
+
+      providerMessageId:
+        sentMessage.id,
+
+      threadId:
+        sentMessage.threadId ||
+        threadId ||
+        '',
+
+      rfcMessageId:
+        generatedMessageId,
+
+      outgoingMessageId:
+        outgoingMessage?._id ||
+        null,
+
+      to:
+        normalizedTo,
+
+      from,
+    };
+  };
+
+/*
+|--------------------------------------------------------------------------
+| Send Initial Auto Reply Through Gmail
+|--------------------------------------------------------------------------
+*/
+
+const sendGmailAutoReply =
+  async ({
+    conversation,
+    senderEmail,
+    senderName,
+    messageId,
+    references,
+    rfcMessageId = '',
+  }) => {
+    try {
+      if (!conversation?._id) {
+        throw new Error(
+          'Conversation ID is required for auto reply.'
+        );
+      }
+
+      if (!senderEmail) {
+        throw new Error(
+          'Customer email is required for auto reply.'
+        );
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Prevent Duplicate Initial Auto Replies
+      |--------------------------------------------------------------------------
+      */
+
+      const existingAutoReply =
+        await EmailMessage.findOne({
+          conversation:
+            conversation._id,
+
+          direction:
+            'OUTGOING',
+
+          isAutoReply:
+            true,
+
+          autoReplyType:
+            'INITIAL_REQUEST',
+        });
+
+      if (existingAutoReply) {
+        console.log(
+          `Initial auto reply already exists for ${senderEmail}.`
+        );
+
+        return {
+          success: true,
+          skipped: true,
+
+          reason:
+            'Initial auto reply already exists.',
+
+          messageId:
+            existingAutoReply._id,
+        };
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Build Reply
+      |--------------------------------------------------------------------------
+      */
+
+      const {
+        subject,
+        text,
+        html,
+      } =
+        buildInitialAutoReply({
+          senderName,
+        });
+
+      /*
+      |--------------------------------------------------------------------------
+      | Send Through Gmail API
+      |--------------------------------------------------------------------------
+      |
+      | IMPORTANT:
+      | Use the actual RFC Message-ID of the incoming email.
+      | Do NOT use Gmail API message ID as In-Reply-To.
+      |--------------------------------------------------------------------------
+      */
+
+      const result =
+        await sendGmailEmail({
+          to:
+            senderEmail,
+
+          subject,
+
+          text,
+
+          html,
+
+          threadId:
+            conversation.gmailThreadId ||
+            '',
+
+          inReplyTo:
+            rfcMessageId ||
+            '',
+
+          references:
+            references ||
+            rfcMessageId ||
+            '',
+          
+          conversationId:
+            conversation._id,
+
+          isAutoReply:
+            true,
+
+          autoReplyType:
+            'INITIAL_REQUEST',
+        });
+
+      /*
+      |--------------------------------------------------------------------------
+      | Update Conversation
+      |--------------------------------------------------------------------------
+      */
+
+      conversation.status =
+        'WAITING';
+
+      conversation.lastMessage =
+        'Automatic reply sent to customer.';
+
+      conversation.lastMessageAt =
+        new Date();
+
+      if (
+        result.threadId
+      ) {
+        conversation.gmailThreadId =
+          result.threadId;
+      }
+
+      await conversation.save();
+
       console.log(
-        `Initial auto reply already exists for ${senderEmail}.`
+        `Automatic Gmail reply sent successfully to ${senderEmail}`
       );
 
       return {
         success: true,
 
-        skipped: true,
+        skipped: false,
 
-        reason:
-          'Initial auto reply already exists.',
+        providerMessageId:
+          result.providerMessageId ||
+          result.messageId ||
+          '',
 
         messageId:
-          existingAutoReply._id,
+          result.outgoingMessageId ||
+          null,
+
+        gmailMessageId:
+          result.messageId ||
+          '',
+
+        gmailThreadId:
+          result.threadId ||
+          '',
+      };
+    } catch (error) {
+      console.error(
+        `Automatic Gmail reply failed for ${senderEmail}:`,
+        error
+      );
+
+      return {
+        success: false,
+
+        skipped: false,
+
+        error:
+          error.message ||
+          'Automatic Gmail reply failed.',
       };
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Send Auto Reply
-    |--------------------------------------------------------------------------
-    */
-
-    const result =
-      await sendInitialAutoReply({
-        customerEmail:
-          senderEmail,
-
-        customerName:
-          senderName || '',
-
-        conversationId:
-          conversation._id,
-
-        inReplyTo:
-          messageId || '',
-
-        references:
-          references ||
-          messageId ||
-          '',
-      });
-
-    /*
-    |--------------------------------------------------------------------------
-    | Update Conversation
-    |--------------------------------------------------------------------------
-    */
-
-    conversation.status =
-      'WAITING';
-
-    conversation.lastMessage =
-      'Automatic reply sent to customer.';
-
-    conversation.lastMessageAt =
-      new Date();
-
-    if (
-      result?.providerMessageId
-    ) {
-      conversation.latestResendEmailId =
-        result.providerMessageId;
-    }
-
-    await conversation.save();
-
-    console.log(
-      `Automatic reply sent successfully to ${senderEmail}`
-    );
-
-    return {
-      success: true,
-
-      skipped: false,
-
-      providerMessageId:
-        result?.providerMessageId ||
-        result?.messageId ||
-        '',
-
-      messageId:
-        result?.data?._id ||
-        null,
-    };
-  } catch (error) {
-    console.error(
-      `Automatic reply failed for ${senderEmail}:`,
-      error
-    );
-
-    /*
-    |--------------------------------------------------------------------------
-    | Do Not Stop Gmail Sync
-    |--------------------------------------------------------------------------
-    */
-
-    return {
-      success: false,
-
-      skipped: false,
-
-      error:
-        error.message ||
-        'Automatic reply failed.',
-    };
-  }
-};
+  };
 
 /*
 |--------------------------------------------------------------------------
@@ -621,18 +1274,16 @@ const processGmailMessage =
   async (
     gmailMessage
   ) => {
-    const messageId =
+    const gmailMessageId =
       gmailMessage?.id || '';
 
     const threadId =
       gmailMessage?.threadId || '';
 
-    if (!messageId) {
+    if (!gmailMessageId) {
       return {
         success: false,
-
         skipped: true,
-
         reason:
           'Gmail message ID missing.',
       };
@@ -649,10 +1300,12 @@ const processGmailMessage =
         $or: [
           {
             gmailMessageId:
-              messageId,
+              gmailMessageId,
           },
+
           {
-            messageId,
+            providerMessageId:
+              gmailMessageId,
           },
         ],
       });
@@ -666,7 +1319,8 @@ const processGmailMessage =
         reason:
           'Message already exists.',
 
-        messageId,
+        messageId:
+          gmailMessageId,
       };
     }
 
@@ -703,6 +1357,19 @@ const processGmailMessage =
       getHeader(
         headers,
         'Date'
+      );
+
+    /*
+    |--------------------------------------------------------------------------
+    | IMPORTANT:
+    | Actual RFC Message-ID
+    |--------------------------------------------------------------------------
+    */
+
+    const rfcMessageId =
+      getHeader(
+        headers,
+        'Message-ID'
       );
 
     const inReplyTo =
@@ -749,7 +1416,8 @@ const processGmailMessage =
         reason:
           'Sender email could not be determined.',
 
-        messageId,
+        messageId:
+          gmailMessageId,
       };
     }
 
@@ -773,7 +1441,8 @@ const processGmailMessage =
         reason:
           'Own Gmail message skipped.',
 
-        messageId,
+        messageId:
+          gmailMessageId,
       };
     }
 
@@ -842,12 +1511,6 @@ const processGmailMessage =
                 )
               : new Date(),
 
-          /*
-          |--------------------------------------------------------------------------
-          | Gmail Thread ID
-          |--------------------------------------------------------------------------
-          */
-
           gmailThreadId:
             threadId,
         });
@@ -874,15 +1537,8 @@ const processGmailMessage =
           subject;
       }
 
-      /*
-      |--------------------------------------------------------------------------
-      | Save Gmail Thread ID
-      |--------------------------------------------------------------------------
-      */
-
       if (
-        threadId &&
-        !conversation.gmailThreadId
+        threadId
       ) {
         conversation.gmailThreadId =
           threadId;
@@ -938,21 +1594,23 @@ const processGmailMessage =
         html,
 
         /*
-        |--------------------------------------------------------------------------
-        | RFC Message ID
-        |--------------------------------------------------------------------------
+        |----------------------------------------------------------------------
+        | Store ACTUAL RFC Message-ID
+        |----------------------------------------------------------------------
         */
 
-        messageId,
+        messageId:
+          rfcMessageId ||
+          gmailMessageId,
 
         /*
-        |--------------------------------------------------------------------------
-        | Gmail IDs
-        |--------------------------------------------------------------------------
+        |----------------------------------------------------------------------
+        | Store Gmail API Message ID separately
+        |----------------------------------------------------------------------
         */
 
         gmailMessageId:
-          messageId,
+          gmailMessageId,
 
         gmailThreadId:
           threadId,
@@ -962,7 +1620,7 @@ const processGmailMessage =
         references,
 
         providerMessageId:
-          messageId,
+          gmailMessageId,
 
         isAutoReply:
           false,
@@ -981,7 +1639,8 @@ const processGmailMessage =
     */
 
     conversation.latestMessageId =
-      messageId;
+      rfcMessageId ||
+      gmailMessageId;
 
     conversation.gmailThreadId =
       threadId ||
@@ -1005,9 +1664,6 @@ const processGmailMessage =
     |--------------------------------------------------------------------------
     | Automatic Initial Reply
     |--------------------------------------------------------------------------
-    |
-    | Only send this when this is the first email from this customer.
-    |
     */
 
     let autoReply = null;
@@ -1021,7 +1677,16 @@ const processGmailMessage =
 
           senderName,
 
-          messageId,
+          /*
+          | IMPORTANT:
+          | Pass RFC Message-ID, not Gmail API ID.
+          */
+
+          messageId:
+            gmailMessageId,
+
+          rfcMessageId:
+            rfcMessageId,
 
           references,
         });
@@ -1061,11 +1726,14 @@ const processGmailMessage =
       messageId:
         incomingMessage._id,
 
-      gmailMessageId:
-        messageId,
+      gmailMessageId,
 
       gmailThreadId:
         threadId,
+
+      rfcMessageId:
+        rfcMessageId ||
+        '',
 
       customerEmail:
         senderEmail,
@@ -1097,27 +1765,20 @@ const syncGmailInbox =
       | Get Inbox Messages
       |--------------------------------------------------------------------------
       |
-      | IMPORTANT:
       | Only INBOX messages are synchronized.
-      |
-      | When a thread is moved to Gmail Trash,
-      | it is removed from INBOX and therefore
-      | will not come back into the CRM on refresh.
-      |
+      |--------------------------------------------------------------------------
       */
 
       const response =
-        await gmail.users.messages.list(
-          {
-            userId: 'me',
+        await gmail.users.messages.list({
+          userId: 'me',
 
-            labelIds: [
-              'INBOX',
-            ],
+          labelIds: [
+            'INBOX',
+          ],
 
-            maxResults: 50,
-          }
-        );
+          maxResults: 50,
+        });
 
       const messages =
         response?.data?.messages ||
@@ -1205,7 +1866,7 @@ const syncGmailInbox =
               result.autoReplySent
             ) {
               console.log(
-                `Automatic reply sent to ${result.customerEmail}`
+                `Automatic Gmail reply sent to ${result.customerEmail}`
               );
             }
 
@@ -1213,11 +1874,13 @@ const syncGmailInbox =
               result.autoReplyError
             ) {
               console.error(
-                `Automatic reply error for ${result.customerEmail}: ${result.autoReplyError}`
+                `Automatic Gmail reply error for ${result.customerEmail}: ${result.autoReplyError}`
               );
             }
           }
-        } catch (messageError) {
+        } catch (
+          messageError
+        ) {
           skipped++;
 
           console.error(
@@ -1274,16 +1937,13 @@ const syncGmailInbox =
 
 module.exports = {
   getGmailOAuthClient,
-
   getGmailConnection,
-
   getGmailClient,
-
   getGmailMessage,
-
   deleteGmailThread,
-
+  sendGmailEmail,
+  sendGmailAutoReply,
   syncGmailInbox,
-
   processGmailMessage,
 };
+
